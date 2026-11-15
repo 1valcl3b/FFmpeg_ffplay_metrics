@@ -333,6 +333,18 @@ typedef struct VideoState {
     SDL_cond *continue_read_thread;
 } VideoState;
 
+
+
+static const char *metrics_filename = NULL;
+static FILE *metrics_file = NULL;
+static int64_t metrics_inicio_tempo = 0;
+static int64_t metrics_ultimo_tempo = 0;
+static long metrics_total_frames = 0;
+static long metrics_ultimo_frame = 0;
+
+
+
+
 /* options specified by the user */
 static const AVInputFormat *file_iformat;
 static const char *input_filename;
@@ -1495,6 +1507,22 @@ static void stream_close(VideoState *is)
 
 static void do_exit(VideoState *is)
 {
+    if (metrics_file) {
+        if (metrics_inicio_tempo > 0) {
+            int64_t agora = av_gettime_relative();
+            double intervalo = (agora - metrics_ultimo_tempo) / 1000000.0;
+            if (intervalo >= 0.1) {
+                double tempo_s = (agora - metrics_inicio_tempo) / 1000000.0;
+                double fps_final = (metrics_total_frames - metrics_ultimo_frame) / intervalo;
+                double media_fps_final = (metrics_total_frames - metrics_ultimo_frame -1) / tempo_s;
+                fprintf(metrics_file, "%.2f,%.2f,%2f\n", tempo_s, fps_final, media_fps_final);
+            }
+        }
+        fflush(metrics_file);
+        fclose(metrics_file);
+        metrics_file = NULL;
+    }
+
     if (is) {
         stream_close(is);
     }
@@ -1800,12 +1828,14 @@ static long count_p = 0;
 static long count_b = 0;
 static long count_corrupt = 0;
 
+
+
 /* called to display each frame */
 static void video_refresh(void *opaque, double *remaining_time)
 {
     VideoState *is = opaque;
     double time;
-    static long total_frames = 0;
+
     static double fps_atual = 0.0;
 
     Frame *sp, *sp2;
@@ -1911,31 +1941,39 @@ retry:
             frame_queue_next(&is->pictq);
             is->force_refresh = 1;
 
-            /* Calculo de FPS, By ivalcleb */
-            {
-                static long ultimo_frame = 0;
-                static int64_t ultimo_tempo = 0;
-                int64_t agora = av_gettime_relative();
-
-                total_frames++;
-
-                if (ultimo_tempo == 0) {
-                    ultimo_tempo = agora;
-                    ultimo_frame = total_frames;
-                }
-
-                double intervalo = (agora - ultimo_tempo) / 1000000.0;
-
-                if (intervalo >= 1.0) {
-                    fps_atual = (total_frames - ultimo_frame) / intervalo;
-                    ultimo_frame = total_frames;
-                    ultimo_tempo = agora;
-                }
+            /* Contagem de quadros exibidos, By ivalcleb */
+            metrics_total_frames++;
+            if (metrics_inicio_tempo == 0) {
+                int64_t agora_inicio = av_gettime_relative();
+                metrics_inicio_tempo = agora_inicio;
+                metrics_ultimo_tempo = agora_inicio;
+                metrics_ultimo_frame = metrics_total_frames;
             }
+            
+            
             /* ---------------------------------- */
 
             if (is->step && !is->paused)
                 stream_toggle_pause(is);
+        }
+        /* FPS, By ivalcleb */
+        if (metrics_inicio_tempo > 0) {
+                int64_t agora = av_gettime_relative();
+                double intervalo = (agora - metrics_ultimo_tempo) / 1000000.0;
+
+                if (intervalo >= 1.0) {
+                    double tempo_s = (agora - metrics_inicio_tempo) / 1000000.0;
+                    fps_atual = (metrics_total_frames - metrics_ultimo_frame) / intervalo;
+                    double media_fps = (metrics_total_frames - 1) / tempo_s;
+
+                    if (metrics_file) {
+                        fprintf(metrics_file, "%.2f,%.2f,%.2f\n", tempo_s, fps_atual, media_fps);
+                        fflush(metrics_file);
+                    }
+
+                    metrics_ultimo_frame = metrics_total_frames;
+                    metrics_ultimo_tempo = agora;
+                }
         }
 display:
         /* display picture */
@@ -1975,7 +2013,7 @@ display:
                        get_master_clock(is),
                        (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")),
                        av_diff,
-                       total_frames,
+                       metrics_total_frames,
                        count_i,
                        count_p,
                        count_b,
@@ -4526,6 +4564,7 @@ static const OptionDef options[] = {
     { "vulkan_params",      OPT_TYPE_STRING, OPT_EXPERT, { &vulkan_params }, "vulkan configuration using a list of key=value pairs separated by ':'" },
     { "video_bg",           OPT_TYPE_STRING, OPT_EXPERT, { &video_background }, "set video background for transparent videos" },
     { "hwaccel",            OPT_TYPE_STRING, OPT_EXPERT, { &hwaccel }, "use HW accelerated decoding" },
+    { "metrics",  OPT_TYPE_STRING, 0, { &metrics_filename }, "salva metricas de FPS em arquivo CSV", "arquivo" },
     { NULL, },
 };
 
@@ -4597,6 +4636,17 @@ int main(int argc, char **argv)
     show_banner(argc, argv, options);
 
     ret = parse_options(NULL, argc, argv, options, opt_input_file);
+    
+    if (metrics_filename) {
+        metrics_file = fopen(metrics_filename, "w");
+        if (!metrics_file) {
+            av_log(NULL, AV_LOG_FATAL, "Nao foi possivel criar o arquivo CSV: %s\n", metrics_filename);
+            exit(1);
+        }
+        fprintf(metrics_file, "tempo_s,fps,media_fps\n");
+        fflush(metrics_file);
+    }
+
     if (ret < 0)
         exit(ret == AVERROR_EXIT ? 0 : 1);
 
