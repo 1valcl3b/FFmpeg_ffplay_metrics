@@ -1794,11 +1794,19 @@ static void update_video_pts(VideoState *is, double pts, int serial)
     sync_clock_to_slave(&is->extclk, &is->vidclk);
 }
 
+
+static long count_i = 0;
+static long count_p = 0;
+static long count_b = 0;
+static long count_corrupt = 0;
+
 /* called to display each frame */
 static void video_refresh(void *opaque, double *remaining_time)
 {
     VideoState *is = opaque;
     double time;
+    static long total_frames = 0;
+    static double fps_atual = 0.0;
 
     Frame *sp, *sp2;
 
@@ -1903,6 +1911,29 @@ retry:
             frame_queue_next(&is->pictq);
             is->force_refresh = 1;
 
+            /* Calculo de FPS, By ivalcleb */
+            {
+                static long ultimo_frame = 0;
+                static int64_t ultimo_tempo = 0;
+                int64_t agora = av_gettime_relative();
+
+                total_frames++;
+
+                if (ultimo_tempo == 0) {
+                    ultimo_tempo = agora;
+                    ultimo_frame = total_frames;
+                }
+
+                double intervalo = (agora - ultimo_tempo) / 1000000.0;
+
+                if (intervalo >= 1.0) {
+                    fps_atual = (total_frames - ultimo_frame) / intervalo;
+                    ultimo_frame = total_frames;
+                    ultimo_tempo = agora;
+                }
+            }
+            /* ---------------------------------- */
+
             if (is->step && !is->paused)
                 stream_toggle_pause(is);
         }
@@ -1940,14 +1971,20 @@ display:
 
             av_bprint_init(&buf, 0, AV_BPRINT_SIZE_AUTOMATIC);
             av_bprintf(&buf,
-                      "%7.2f %s:%7.3f fd=%4d aq=%5dKB vq=%5dKB sq=%5dB \r",
-                      get_master_clock(is),
-                      (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")),
-                      av_diff,
-                      is->frame_drops_early + is->frame_drops_late,
-                      aqsize / 1024,
-                      vqsize / 1024,
-                      sqsize);
+                      "BY 1valcl3b | %7.2f %s:%7.3f frames=%ld (I:%ld P:%ld B:%ld err:%ld) fps=%5.2f fd=%4d aq=%5dKB vq=%5dKB sq=%5dB \r",
+                       get_master_clock(is),
+                       (is->audio_st && is->video_st) ? "A-V" : (is->video_st ? "M-V" : (is->audio_st ? "M-A" : "   ")),
+                       av_diff,
+                       total_frames,
+                       count_i,
+                       count_p,
+                       count_b,
+                       count_corrupt,
+                       fps_atual,
+                       is->frame_drops_early + is->frame_drops_late,
+                       aqsize / 1024,
+                       vqsize / 1024,
+                       sqsize);
 
             if (show_status == 1 && AV_LOG_INFO > av_log_get_level())
                 fprintf(stderr, "%s", buf.str);
@@ -1965,6 +2002,16 @@ display:
 static int queue_picture(VideoState *is, AVFrame *src_frame, double pts, double duration, int64_t pos, int serial)
 {
     Frame *vp;
+    /* Contagem de tipos de quadro e corrupcao, By ivalcleb */
+    switch (src_frame->pict_type) {
+        case AV_PICTURE_TYPE_I: count_i++; break;
+        case AV_PICTURE_TYPE_P: count_p++; break;
+        case AV_PICTURE_TYPE_B: count_b++; break;
+        default: break;
+    }
+    if (src_frame->flags & AV_FRAME_FLAG_CORRUPT)
+        count_corrupt++;
+    /* ---------------------------------------------------- */
 
 #if defined(DEBUG_SYNC)
     printf("frame_type=%c pts=%0.3f\n",
